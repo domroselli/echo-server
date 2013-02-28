@@ -22,7 +22,7 @@ void sigchld_handler( int s );
 void print_usage();
 void set_sigaction();
 void *get_in_addr( struct sockaddr *sa );
-void server_init_hints( struct addrinfo *sa );
+void server_set_hints( struct addrinfo *sa );
 int socket_open( struct addrinfo *pservinfo );
 int socket_create( const char *port );
 void connection_service( int sockfd, int accptfd );
