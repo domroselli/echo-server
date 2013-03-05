@@ -1,12 +1,12 @@
 CFLAGS=-Wall -g -DNDEBUG
 
-all:         echo_util echo_server echo_client
+all:         util server client
 
-echo_util:	 echo_util.o
+util:	 	 shared/util.o
 
-echo_server: echo_server.o
+server:      shared/util.o server/server.o
 
-echo_client: echo_client.o
+client: 	 shared/util.o client/client.o
 
 clean:
-		rm -f echo_server.o echo_client.o echo_util.o
+		rm -f shared/util.o server/server.o client/client.o

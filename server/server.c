@@ -6,183 +6,197 @@ void print_usage( ) {
 }
 
 // get sockaddr, IPv4 or IPv6
-void *get_in_addr( struct sockaddr *sa ) {
-    if ( sa->sa_family == AF_INET ) {
+void *get_in_addr(struct sockaddr *sa) {
+    if (sa->sa_family == AF_INET) {
         return &(((struct sockaddr_in*)sa)->sin_addr);
     }
 
     return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
-void sigchld_handler( int s ) {
-    while ( waitpid( -1, NULL, WNOHANG) > 0 )
+void sigchld_handler(int s) {
+    while (waitpid( -1, NULL, WNOHANG) > 0)
         ;
 }
 
-void set_sigaction( ) {
+int set_sigaction( ) {
     struct sigaction sa;
     sa.sa_handler = sigchld_handler;
-    sigemptyset( &sa.sa_mask );
+    sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART;
 
-    if ( sigaction( SIGCHLD, &sa, NULL ) == SIGACTION_FAILURE ) {
-        perror( KRED "sigaction" );
-        exit( EXIT_FAILURE );
-    }
+    return sigaction(SIGCHLD, &sa, NULL);
 }
 
-int socket_open( struct addrinfo *pservinfo ) {
-    int yes = 1;
+int socket_open(struct addrinfo *pservinfo) {
+    int yes =  1;
+    int fd  = -1;
     struct addrinfo *p;
-    int sockfd = SOCKET_OPEN_FAILURE;
 
-    for ( p = pservinfo; p != NULL; p = p->ai_next ) {
-        if ( ( sockfd = socket( p->ai_family, 
-                                p->ai_socktype, 
-                                p->ai_protocol ) ) == SOCKET_FAILURE ) {
-
-            perror( KYEL "server: socket" );
+    //
+    // Bind to the first addrinfo we can and break out
+    //
+    for (p = pservinfo; p != NULL; p = p->ai_next) {
+        if ((fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
+            perror(KYEL "server: socket");
             continue;
         }
 
-        if ( setsockopt( sockfd,
-                         SOL_SOCKET,
-                         SO_REUSEADDR,
-                         &yes,
-                         sizeof( int ) ) == SOCKOPT_FAILURE) {
-
-            perror( KYEL "setsockopt" );
-            return SOCKET_OPEN_FAILURE;
-        }
-
-        if ( bind( sockfd, 
-                   p->ai_addr, 
-                   p->ai_addrlen ) == BIND_FAILURE ) {
-
-            close( sockfd );
-            perror( KYEL "server: bind" );
+        if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1) {
+            perror(KYEL "setsockopt");
             continue;
         }
 
-        //        
+        if (bind(fd, p->ai_addr, p->ai_addrlen) == -1) {
+            perror(KYEL "server: bind");
+            continue;
+        }
+
         // SUCCESS! 
-        //
         break;
     }
 
-    if ( !p ) {
-        fprintf( stderr, KRED "socket_open: failed to bind\n" );
-        return SOCKET_OPEN_FAILURE;
+    if (p == NULL) {
+        fprintf(stderr, KRED "socket_open: failed to bind\n");
+        if (fd != -1) {
+            close(fd);
+        }
     }
 
-    return sockfd;
+    return fd;
 }
 
-int socket_create( const char *port ) {
+int socket_create(const char *port) {
     int result;
-    int sockfd;
+    int fd;
     struct addrinfo hints;
     struct addrinfo *pservinfo  = NULL;
 
     //
     // set up the passive socket to listen on
     //
-    memset( &hints, 0, sizeof( hints ) );
-    hints.ai_family = AF_UNSPEC;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE;
+    hints.ai_flags    = AI_PASSIVE;
 
-    result = getaddrinfo( NULL, port, &hints, &pservinfo ); 
-    if ( result != GETADDRINFO_SUCCESS ) {
-        fprintf( stderr, KRED "getaddrinfo: %s\n", gai_strerror( result ) ) ;
-        return SOCKET_CREATE_FAILURE;
+    if ((result = getaddrinfo(NULL, port, &hints, &pservinfo)) != 0) {
+        fprintf(stderr, KRED "getaddrinfo: %s\n", gai_strerror(result));
+        fd = FAILURE;
+        goto error;
     }
 
-    sockfd = socket_open( pservinfo );
-    if ( sockfd == SOCKET_OPEN_FAILURE ) {
-        return SOCKET_CREATE_FAILURE;
+    if ((fd = socket_open(pservinfo)) == -1) {
+        fd = FAILURE;
+        goto error;
     }
 
-    if ( listen( sockfd, BACKLOG ) == LISTEN_FAILURE ) {
-        perror( KRED "listen" );
-        return SOCKET_CREATE_FAILURE; 
+    if (listen(fd, BACKLOG) == -1) {
+        perror(KRED "listen");
+        fd = FAILURE;
+        goto error;
     }
     
-    freeaddrinfo( pservinfo );
+error:
+    freeaddrinfo(pservinfo);
 
-    return sockfd;
+    return fd;
 }
 
-void connection_service( int sockfd, int accptfd ) {
-    int rbytes;
+int incoming_socket_serv(int sfd, int afd) {
+    int recvd, pid, status;
     char *buf;
 
-    if ( !fork( ) ) {
-        close( sockfd );
-        buf = (char *)malloc( sizeof( char ) * BUFSIZE );
-        while ( ( rbytes = socket_recv( accptfd, buf, BUFSIZE ) )
-                && rbytes != CONNECTION_RECV_FAILURE) {
-
-            socket_send( accptfd, buf, strlen( buf ) );
-        }
-
-        if ( rbytes == CONNECTION_RECV_FAILURE ) {
-            exit( EXIT_FAILURE );
-        }
-
-        close( accptfd );
-        free( buf );
-
-        exit( EXIT_SUCCESS );
+    if (sfd < 0 || afd < 0) {
+        return FAILURE;
     }
+
+    pid = fork();
+    if (pid == 0) {
+        close(sfd);
+        buf = (char *)malloc(sizeof(char) * BUFSIZE);
+        memset(buf, 0, sizeof(char) * BUFSIZE);
+
+        while ((recvd = socket_recv(afd, buf, BUFSIZE)) > 0) {
+            socket_send(afd, buf, strlen(buf));
+        }
+
+        close(afd);
+        free(buf);
+        
+        if (recvd == FAILURE) {
+            exit(EXIT_FAILURE);
+        }
+        exit(EXIT_SUCCESS);
+    } else if (pid > 0) {
+        waitpid(pid, &status, 0);
+    } else {
+        return FAILURE;
+    }
+
+    if (status != EXIT_SUCCESS) {
+        return FAILURE;
+    }
+
+    return SUCCESS;
 }
 
-void connection_wait( int sockfd ) {
-    struct sockaddr_storage client_addr;
-    socklen_t sin_size              =  0;
-    int       accptfd               = -1;
+void incoming_socket_wait(int sfd) {
+    struct sockaddr_storage client;
+    socklen_t clen                  =  sizeof(client);
+    int       afd                   = -1;
     char      dst[INET6_ADDRSTRLEN] = { '\0' };
 
-
     for (;;) {
-        sin_size = sizeof( client_addr );
-        accptfd = accept( sockfd, (struct sockaddr *)&client_addr, &sin_size );
-        if ( accptfd == ACCEPT_FAILURE ) {
-            perror( KRED "accept" );
+        if ((afd = accept(sfd, (struct sockaddr *)&client, &clen)) == -1) {
+            perror(KRED "accept");
             continue;
         }
 
-        inet_ntop( client_addr.ss_family, 
-                   get_in_addr( (struct sockaddr *) &client_addr ), 
+        inet_ntop( client.ss_family, 
+                   get_in_addr( (struct sockaddr *) &client ), 
                    dst, 
-                   sizeof( dst ) );
+                   sizeof(dst));
 
-        printf( KGRN "server: got connection from %s\n", dst);
-        connection_service( sockfd, accptfd );
+        printf(KGRN "server: got connection from %s\n", dst);
+
+        if (incoming_socket_serv(sfd, afd) == FAILURE) {
+            printf(KRED "server: client process failed\n");
+        }
+        close(afd);
     }
-    close( accptfd );
 }
 
-int main( int argc, char *argv[] ) {
-    int        sockfd = -1;
+int main(int argc, char *argv[]) {
+    int        fd = -1;
     const char *port;
 
     if (argc < MAXARGS) {
         print_usage();
-        exit( EXIT_FAILURE );
+        goto error;
     }
 
     port = argv[1];
-    sockfd = socket_create( port );
-    if ( sockfd == SOCKET_CREATE_FAILURE ) {
-        exit( EXIT_FAILURE );
+    if ((fd = socket_create(port)) == FAILURE) {
+        perror("socket_create");
+        goto error;
     }
 
     // Kill all zombie process
-    set_sigaction();
+    if (set_sigaction() == FAILURE) {
+        perror("sigaction");
+        goto error;
+    }
 
-    printf( KGRN "server: waiting for connections...\n" );
-    connection_wait( sockfd );
+    printf(KGRN "server: waiting for connections...\n");
+    incoming_socket_wait(fd);
 
+    close(fd);
     return 0;
+
+error:
+    if (fd != -1) {
+        close(fd);
+    }
+    exit(EXIT_FAILURE);
 }
